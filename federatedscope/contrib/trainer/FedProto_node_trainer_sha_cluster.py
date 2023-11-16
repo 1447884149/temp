@@ -137,7 +137,7 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
                 i += 1
 
             loss2 = loss2 / i
-        loss2 = loss2
+        loss2 = loss2.squeeze()
         print("算loss2", time.time() - aa)
         # if len(ctx.global_protos) != 0:
         #     global_protos = torch.stack(list(ctx.global_protos.values())).detach()
