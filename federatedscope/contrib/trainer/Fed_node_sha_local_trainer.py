@@ -22,9 +22,8 @@ from federatedscope.contrib.utils.gens_yuanlaiHesha import sampling_node_source,
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-#本地用graphsha，但是mixup中没有用global_prototype,prototype由增强后的生成，worker是fedproto_worker,0.8000469104468168(prototype用增强后的信息，效果会变好）loss2为加上生成后的节点
 # Build your trainer here.
-class FedProto_Node_Trainer(GeneralTorchTrainer):
+class Fed_node_sha_local_trainer(GeneralTorchTrainer):
     def __init__(self,
                  model,
                  data,
@@ -32,7 +31,7 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
                  config,
                  only_for_eval=False,
                  monitor=None):
-        super(FedProto_Node_Trainer, self).__init__(model, data, device, config,
+        super(Fed_node_sha_local_trainer, self).__init__(model, data, device, config,
                                                     only_for_eval, monitor)
         self.loss_mse = nn.MSELoss()
         self.proto_weight = self.ctx.cfg.fedproto.proto_weight
@@ -47,9 +46,9 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
 
         self.task = config.MHFL.task
 
-
     def _hook_on_batch_forward(self, ctx):
         batch = ctx.batch
+
         if ctx.cur_state==0:
         ####graphsha
             if ctx.cur_epoch_i>self._cfg.graphsha.warmup:#ctx.cur_epoch_i为现在所处的epoch
@@ -62,7 +61,7 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
                 # semimxup
                 new_edge_index = neighbor_sampling(batch.x.size(0), batch.edge_index[:, ctx.train_edge_mask], sampling_src_idx,
                                                    ctx.neighbor_dist_list)  # neighbor_dist_list(N,N),邻居距离
-                beta = torch.distributions.beta.Beta(2, self._cfg.graphsha.beta)  # 创建一个Beta分布，1 和 100 的选择意味着 Beta 分布会有一个倾向性，偏向于生成接近于 0 的随机数
+                beta = torch.distributions.beta.Beta(1, 10)  # 创建一个Beta分布，1 和 100 的选择意味着 Beta 分布会有一个倾向性，偏向于生成接近于 0 的随机数
                 lam = beta.sample((len(sampling_src_idx),)).unsqueeze(1) # todo lam这个超参很重要 # 从 Beta 分布中生成一组随机样本，数量等于 len(sampling_src_idx)
                 new_x = saliency_mixup(batch.x, sampling_src_idx, sampling_dst_idx, lam)
             else:
@@ -167,14 +166,14 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
                             loss_instance = self.hierarchical_info_loss(gen_reps.unsqueeze(0), label, all_f, mean_f,
                                                                         all_global_protos_keys, ctx) # 现在改成了用生成数据和proto求loss,以及本地proto求loss
                             loss_instance += loss_instance
-                        loss_instance = 10*loss_instance/num
+                        loss_instance = loss_instance
                     if loss_instance is None:
                         loss_instance = self.hierarchical_info_loss(reps_now, label, all_f, mean_f, all_global_protos_keys, ctx)
                     else:
                         loss_instance += self.hierarchical_info_loss(reps_now, label, all_f, mean_f, all_global_protos_keys, ctx)
 
                     if loss2 is None:
-                        loss2 = loss_instance
+                        loss2 = loss_instance/(num+1)
                     else:
                         loss2 += loss_instance/(num+1)
                 i += 1
@@ -186,13 +185,6 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
         #     similarity = torch.matmul(reps,  global_protos.T)
         # else:
         #     similarity=pred
-        loss = loss1 + loss2 * 0.3
-
-        if ctx.cfg.fedproto.show_verbose:
-            logger.info(
-                f'client#{self.ctx.client_ID} {ctx.cur_split} round:{ctx.cur_state} \t CE_loss:{loss1}'
-                f'\t proto_loss:{loss2},\t total_loss:{loss}')
-
 
         split_mask = batch[f'{ctx.cur_split}_mask']
 
@@ -204,7 +196,7 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
         pred = output[split_mask]
         ctx.y_true = CtxVar(labels, LIFECYCLE.BATCH)
         ctx.y_prob = CtxVar(pred, LIFECYCLE.BATCH)
-        ctx.loss_batch = CtxVar(loss, LIFECYCLE.BATCH)
+        ctx.loss_batch = CtxVar(loss1, LIFECYCLE.BATCH)
         ctx.batch_size = CtxVar(len(labels), LIFECYCLE.BATCH)
 
 
@@ -289,10 +281,10 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
         ctx.agg_local_protos = agg_local_protos
 
         # t-she可视化用
-        if ctx.cfg.vis_embedding:
-            ctx.node_emb_all = ctx.reps_aug.clone().detach()
-            ctx.node_labels = ctx.batch.y.clone().detach()
-        #     simple_TSHE(ctx.reps_aug[:ctx.batch.x.size(0)][split_mask].clone().detach(), ctx.batch.y[split_mask].clone().detach(), ctx.reps_aug[ctx.batch.x.size(0):].clone().detach(), _new_y.clone().detach(), 0,0)
+        # if ctx.cfg.vis_embedding:
+        #     ctx.node_emb_all = ctx.reps_aug.clone().detach()
+        #     ctx.node_labels = ctx.batch.y.clone().detach()
+        #     simple_TSHE(ctx.reps_aug[:ctx.batch.x.size(0)].clone().detach(), ctx.batch.y.clone().detach(), ctx.reps_aug[ctx.batch.x.size(0):].clone().detach(), _new_y.clone().detach())
 
 
     def train(self, target_data_split_name="train", hooks_set=None):
@@ -449,10 +441,11 @@ def make_longtailed_data_remove(edge_index, label, n_data, n_cls, ratio, train_m
 
 
 
+
 def call_my_trainer(trainer_type):
-    if trainer_type == 'fedproto_node_trainer_sha_cluster':
-        trainer_builder = FedProto_Node_Trainer
+    if trainer_type == 'Fed_node_sha_local_trainer':
+        trainer_builder = Fed_node_sha_local_trainer
         return trainer_builder
 
 
-register_trainer('fedproto_node_trainer_sha_cluster', call_my_trainer)
+register_trainer('Fed_node_sha_local_trainer', call_my_trainer)

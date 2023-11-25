@@ -9,16 +9,17 @@ import time
 import datetime
 from federatedscope.core.auxiliaries.utils import merge_dict_of_results, \
     Timeout, merge_param_dict
+
 logger = logging.getLogger(__name__)
 
 
 # Build your worker here.
-class FedprotoServer(Server):
-    
+class FedShaLocalServer(Server):
+
     def check_and_move_on(self,
                           check_eval_result=False,
                           min_received_num=None):
-        #TODO: 需要完善当采样率不等于0时的实现
+        # TODO: 需要完善当采样率不等于0时的实现
         min_received_num = len(self.comm_manager.get_neighbors().keys())
 
         if check_eval_result and self._cfg.federate.mode.lower(
@@ -82,7 +83,7 @@ class FedprotoServer(Server):
     def _proto_aggregation(self, local_protos_list):
 
         agg_protos_label = dict()
-        for idx in local_protos_list:# 对各个客户端的proto_list进行操作
+        for idx in local_protos_list:  # 对各个客户端的proto_list进行操作
             local_protos = local_protos_list[idx]
             for label in local_protos.keys():
                 if label in agg_protos_label:
@@ -98,20 +99,20 @@ class FedprotoServer(Server):
                 c, num_clust, req_c = FINCH(proto_list, initial_rank=None, req_clust=None, distance='cosine',
                                             ensure_early_exit=False, verbose=True)
 
-                m, n = c.shape #3个localproto，1个聚类
+                m, n = c.shape  # 3个localproto，1个聚类
                 class_cluster_list = []
                 for index in range(m):
-                    class_cluster_list.append(c[index, -1])# 存储的是每个数据点所属的聚类标签
+                    class_cluster_list.append(c[index, -1])  # 存储的是每个数据点所属的聚类标签
 
                 class_cluster_array = np.array(class_cluster_list)
                 uniqure_cluster = np.unique(class_cluster_array).tolist()
                 agg_selected_proto = []
 
                 for _, cluster_index in enumerate(uniqure_cluster):
-                    selected_array = np.where(class_cluster_array == cluster_index) #获得该聚类对应的数据点索引
+                    selected_array = np.where(class_cluster_array == cluster_index)  # 获得该聚类对应的数据点索引
                     selected_proto_list = proto_list[selected_array]
-                    proto = np.mean(selected_proto_list, axis=0, keepdims=True)#获得该聚类的平均proto
-                    agg_selected_proto.append(torch.tensor(proto))# 该类的聚类proto的dict
+                    proto = np.mean(selected_proto_list, axis=0, keepdims=True)  # 获得该聚类的平均proto
+                    agg_selected_proto.append(torch.tensor(proto))  # 该类的聚类proto的dict
                 agg_protos_label[label] = agg_selected_proto
             else:
                 agg_protos_label[label] = torch.tensor([proto_list[0].data]).to('cuda:3')
@@ -119,14 +120,14 @@ class FedprotoServer(Server):
         return agg_protos_label
 
     def _start_new_training_round(self, global_protos):
-        self._broadcast_custom_message(msg_type='global_proto',content=global_protos)
+        self._broadcast_custom_message(msg_type='global_proto', content=global_protos)
 
     def eval(self):
-        self._broadcast_custom_message(msg_type='evaluate',content=None, filter_unseen_clients=False)
+        self._broadcast_custom_message(msg_type='evaluate', content=None, filter_unseen_clients=False)
 
     def _broadcast_custom_message(self, msg_type, content,
-                                 sample_client_num=-1,
-                                 filter_unseen_clients=True):
+                                  sample_client_num=-1,
+                                  filter_unseen_clients=True):
         if filter_unseen_clients:
             # to filter out the unseen clients when sampling
             self.sampler.change_state(self.unseen_clients_id, 'unseen')
@@ -154,7 +155,7 @@ class FedprotoServer(Server):
             self.sampler.change_state(self.unseen_clients_id, 'seen')
 
 
-class FedprotoClient(Client):
+class FedShaLocalClient(Client):
     def __init__(self,
                  ID=-1,
                  server_id=None,
@@ -167,7 +168,7 @@ class FedprotoClient(Client):
                  is_unseen_client=False,
                  *args,
                  **kwargs):
-        super(FedprotoClient, self).__init__(ID, server_id, state, config, data, model, device,
+        super(FedShaLocalClient, self).__init__(ID, server_id, state, config, data, model, device,
                                              strategy, is_unseen_client, *args, **kwargs)
         self.trainer.ctx.global_protos = []
         self.trainer.ctx.client_ID = self.ID
@@ -192,13 +193,14 @@ class FedprotoClient(Client):
                     receiver=[self.server_id],
                     timestamp=0,
                     content=self.local_address))
+
     def callback_funcs_for_model_para(self, message: Message):
         round = message.state
         sender = message.sender
-
+        timestamp = message.timestamp
         content = message.content
 
-        #替换本地global_proto
+        # 替换本地global_proto
         if message.msg_type == 'global_proto':
             self.trainer.update(content)
         self.state = round
@@ -206,7 +208,7 @@ class FedprotoClient(Client):
         train_start = time.time()
         sample_size, model_para, results, agg_protos = self.trainer.train()
         train_end = time.time()
-        print("一轮本地训练时间", train_end-train_start)
+        print("一轮本地训练时间", train_end - train_start)
         train_log_res = self._monitor.format_eval_res(
             results,
             rnd=self.state,
@@ -218,12 +220,11 @@ class FedprotoClient(Client):
             self._monitor.save_formatted_results(train_log_res,
                                                  save_file_name="")
 
-        if self._cfg.vis_embedding:
-            self.glob_proto_on_client[round] = self.trainer.ctx.global_protos
-            self.client_node_emb_all[round] = self.trainer.ctx.node_emb_all
-            self.client_node_labels[round] = self.trainer.ctx.node_labels
-            self.client_agg_proto[round] = agg_protos
-
+        # if self._cfg.vis_embedding:
+        #     self.glob_proto_on_client[round] = self.trainer.ctx.global_protos
+        #     self.client_node_emb_all[round] = self.trainer.ctx.node_emb_all
+        #     self.client_node_labels[round] = self.trainer.ctx.node_labels
+        #     self.client_agg_proto[round] = agg_protos
 
         self.comm_manager.send(
             Message(msg_type='model_para',
@@ -237,8 +238,8 @@ class FedprotoClient(Client):
             f"================= client {self.ID} received finish message "
             f"=================")
 
-        if message.content is not None:
-            self.trainer.update(message.content, strict=True)
+        # if message.content is not None:
+        #     self.trainer.update(message.content, strict=True)
         if self._cfg.vis_embedding:
             folderPath = self._cfg.MHFL.emb_file_path
             torch.save(self.glob_proto_on_client, f'{folderPath}/global_protos_on_client_{self.ID}.pth')  # 全局原型
@@ -249,10 +250,11 @@ class FedprotoClient(Client):
             torch.save(self.data, f'{folderPath}/raw_data_on_client_{self.ID}.pth')  # 划分给这个client的pyg data
         self._monitor.finish_fl()
 
+
 def call_my_worker(method):
-    if method == 'fedproto_cluster':
-        worker_builder = {'client': FedprotoClient, 'server': FedprotoServer}
+    if method == 'fed_sha_local':
+        worker_builder = {'client': FedShaLocalClient, 'server': FedShaLocalServer}
         return worker_builder
 
 
-register_worker('fedproto_cluster', call_my_worker)
+register_worker('fed_sha_local', call_my_worker)
