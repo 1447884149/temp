@@ -1,30 +1,29 @@
 set -e
 cd ../../../ #到federatedscope目录
 # basic configuration
-# cd /data/yhp2022/FS/federatedscope/model_heterogeneity/SFL_methods/FedProto
-gpu=8
-result_folder_name=local_sha
+# cd /data/yhp2022/FS/federatedscope/model_heterogeneity/SFL_methods/FedProto_rethink_cluster
+gpu=7
+result_folder_name=FedProto_rethink_cluster2
 global_eval=False
 local_eval_whole_test_dataset=True
-method=local_sha
+method=FedProto_rethink_cluster
 script_floder="model_heterogeneity/SFL_methods/"${method}
 result_floder=model_heterogeneity/result/${result_folder_name}
 # common hyperparameters
 dataset='citeseer'
-total_client=(10)
-local_update_step=(8 16 24 32)
+total_client=(3 5 7 10)
+local_update_step=(4 16 32)
 optimizer='SGD'
 seed=(0 1 2)
-lrs=(0.01 0.03 0.05 0.1 0.25)
-total_round=60
-patience=30
+lrs=(0.05 0.1 0.25)
+total_round=200
+patience=60
 momentum=0.9
 freq=1
 pass_round=0
 # Local-specific parameters
-proto_weight=(0.1 0.3 0.5)
+proto_weight=(0.1)
 lamda=(0.1 0.5 1.0)
-warmup=(3 4 5)
 # Define function for model training
 cnt=0
 train_model() {
@@ -43,8 +42,8 @@ train_model() {
     result_floder ${result_floder} \
     exp_name ${exp_name} \
     eval.freq ${freq} \
-    fedproto.lamda ${6} \
-    graphsha.warmup ${7}
+    fedproto.proto_weight ${5} \
+    fedproto.lamda ${6}
 }
 
 # Loop over parameters for HPO
@@ -52,9 +51,9 @@ for data in "${dataset[@]}"; do
   for client_num in "${total_client[@]}"; do
     for lr in "${lrs[@]}"; do
       for ls in "${local_update_step[@]}"; do
-        for s in "${seed[@]}"; do
-          for lamda in "${lamda[@]}"; do
-            for warmup in "${warmup[@]}"; do
+        for weight in "${proto_weight[@]}"; do
+          for s in "${seed[@]}"; do
+            for lamda in "${lamda[@]}"; do
               let cnt+=1
               if [ "$cnt" -lt $pass_round ]; then
                 continue
@@ -62,7 +61,7 @@ for data in "${dataset[@]}"; do
               main_cfg=$script_floder"/"$method"_on_"$data".yaml"
               client_cfg="model_heterogeneity/model_settings/"$client_num"_Heterogeneous_GNNs.yaml"
               exp_name="SFL_HPO_"$method"_on_"$data"_"$client_num"_clients"
-              train_model "$client_num" "$s" "$ls" "$lr" "$lamda" "$warmup"
+              train_model "$client_num" "$s" "$ls" "$lr" "$weight" "$lamda"
             done
           done
         done

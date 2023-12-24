@@ -1,29 +1,29 @@
 set -e
 cd ../../../ #到federatedscope目录
 # basic configuration
-# cd /data/yhp2022/FS/federatedscope/model_heterogeneity/SFL_methods/FedProto_rethink_cluster
+# cd /data/yhp2022/FS/federatedscope/model_heterogeneity/SFL_methods/FedProto
 gpu=6
-result_folder_name=FedProto_rethink_cluster2
+result_folder_name=FedProto_cluster
 global_eval=False
 local_eval_whole_test_dataset=True
-method=FedProto_rethink_cluster
+method=FedProto
 script_floder="model_heterogeneity/SFL_methods/"${method}
 result_floder=model_heterogeneity/result/${result_folder_name}
 # common hyperparameters
-dataset='cora'
-total_client=(3 5 7 10)
-local_update_step=(4 16 32)
+dataset=('citeseer')
+total_client=(10)
+local_update_step=(5)
 optimizer='SGD'
 seed=(0 1 2)
-lrs=(0.05 0.1 0.25)
+lrs=(0.05 0.1 0.15 0.25)
 total_round=200
 patience=60
 momentum=0.9
 freq=1
 pass_round=0
+beta=(1 2 4)
 # Local-specific parameters
-proto_weight=(0.1)
-lamda=(0.1 0.5 1.0)
+proto_weight=(0.1 0.2 0.3)
 # Define function for model training
 cnt=0
 train_model() {
@@ -43,7 +43,7 @@ train_model() {
     exp_name ${exp_name} \
     eval.freq ${freq} \
     fedproto.proto_weight ${5} \
-    fedproto.lamda ${6}
+    graphsha.beta ${6}
 }
 
 # Loop over parameters for HPO
@@ -53,15 +53,15 @@ for data in "${dataset[@]}"; do
       for ls in "${local_update_step[@]}"; do
         for weight in "${proto_weight[@]}"; do
           for s in "${seed[@]}"; do
-            for lamda in "${lamda[@]}"; do
-              let cnt+=1
-              if [ "$cnt" -lt $pass_round ]; then
-                continue
-              fi
-              main_cfg=$script_floder"/"$method"_on_"$data".yaml"
-              client_cfg="model_heterogeneity/model_settings/"$client_num"_Heterogeneous_GNNs.yaml"
-              exp_name="SFL_HPO_"$method"_on_"$data"_"$client_num"_clients"
-              train_model "$client_num" "$s" "$ls" "$lr" "$weight" "$lamda"
+            for beta in "${beta[@]}"; do
+            let cnt+=1
+            if [ "$cnt" -lt $pass_round ]; then
+              continue
+            fi
+            main_cfg=$script_floder"/"$method"_on_"$data".yaml"
+            client_cfg="model_heterogeneity/model_settings/"$client_num"_Heterogeneous_GNNs.yaml"
+            exp_name="SFL_HPO_"$method"_on_"$data"_"$client_num"_clients"
+            train_model "$client_num" "$s" "$ls" "$lr" "$weight" "$beta"
             done
           done
         done

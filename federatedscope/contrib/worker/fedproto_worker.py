@@ -167,7 +167,7 @@ class FedprotoClient(Client):
         timestamp = message.timestamp
         content = message.content
 
-        #替换本地global_proto
+
         if message.msg_type == 'global_proto':
             self.trainer.update(content)
         self.state = round

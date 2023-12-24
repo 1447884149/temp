@@ -2,15 +2,15 @@ set -e
 cd ../../../ #到federatedscope目录
 # basic configuration
 # cd /data/yhp2022/FS/federatedscope/model_heterogeneity/SFL_methods/FedProto_rethink_cluster
-gpu=6
-result_folder_name=FedProto_rethink_cluster2
+gpu=7
+result_folder_name=FedProto_rethink_cluster3
 global_eval=False
 local_eval_whole_test_dataset=True
 method=FedProto_rethink_cluster
 script_floder="model_heterogeneity/SFL_methods/"${method}
 result_floder=model_heterogeneity/result/${result_folder_name}
 # common hyperparameters
-dataset='cora'
+dataset='pubmed'
 total_client=(3 5 7 10)
 local_update_step=(4 16 32)
 optimizer='SGD'

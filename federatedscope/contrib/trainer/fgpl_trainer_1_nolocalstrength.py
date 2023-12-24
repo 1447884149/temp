@@ -1,3 +1,6 @@
+import copy
+
+from federatedscope.model_heterogeneity.SFL_methods.simple_tshe import simple_TSHE
 from federatedscope.register import register_trainer
 from federatedscope.core.trainers.torch_trainer import GeneralTorchTrainer
 from federatedscope.core.trainers.context import CtxVar, MODE
@@ -5,18 +8,25 @@ from federatedscope.core.trainers.enums import LIFECYCLE
 from federatedscope.core.message import Message
 from federatedscope.core.trainers.context import Context, CtxVar, lifecycle
 import torch.nn as nn
-import copy
+import time
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
 import logging
 import torch
 import datetime
 from collections import OrderedDict, defaultdict
 import numpy as np
+from torch_scatter import scatter_add
+from federatedscope.contrib.utils.neighbor_dist import get_PPR_adj, get_heat_adj, get_ins_neighbor_dist
+from federatedscope.contrib.utils.gens_yuanlaiHesha import sampling_node_source, neighbor_sampling, duplicate_neighbor, saliency_mixup, sampling_idx_individual_dst
+
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# prototype原代码
+
 # Build your trainer here.
-class FedProto_Node_Trainer(GeneralTorchTrainer):
+class FGPL_1_Trainer(GeneralTorchTrainer):
     def __init__(self,
                  model,
                  data,
@@ -24,7 +34,7 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
                  config,
                  only_for_eval=False,
                  monitor=None):
-        super(FedProto_Node_Trainer, self).__init__(model, data, device, config,
+        super(FGPL_1_Trainer, self).__init__(model, data, device, config,
                                                     only_for_eval, monitor)
         self.loss_mse = nn.MSELoss()
         self.proto_weight = self.ctx.cfg.fedproto.proto_weight
@@ -51,7 +61,17 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
 
         loss1 = ctx.criterion(pred, labels)
 
+        # 计算本地proto，用以做loss2
+        reps_dict = defaultdict(list)
+        agg_local_protos = dict()
+        for cls in owned_classes:
+            filted_reps = reps[labels == cls].detach()
+            reps_dict[cls.item()].append(filted_reps)
+        for cls, protos in reps_dict.items():
+            mean_proto = torch.cat(protos).mean(dim=0)
+            agg_local_protos[cls] = mean_proto
         ##########聚类proto在本地算法
+
         if len(ctx.global_protos) != 0:
             all_global_protos_keys = np.array(list(ctx.global_protos.keys()))
             all_f = []
@@ -59,33 +79,74 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
             for protos_key in all_global_protos_keys:
                 temp_f = ctx.global_protos[protos_key]
                 temp_f = torch.cat(temp_f, dim=0).to(ctx.device)
-                all_f.append(temp_f.cpu())
-                mean_f.append(torch.mean(temp_f, dim=0).cpu())
-            all_f = [item.detach() for item in all_f]  # 所有的proto
-            mean_f = [item.detach() for item in mean_f]  # 每个类一个平均proto
+                all_f.append(temp_f)
+                if protos_key in agg_local_protos.keys():
+                    # 计算余弦相似度
+                    similarities = torch.cosine_similarity(agg_local_protos[protos_key], temp_f, dim=1)
+                    # 获取相似性排名前三的索引
+                    best_indices = torch.argsort(similarities, descending=True)[0]
+                    # 获取排名第一的表征
+                    best_proto = temp_f[best_indices]
+                    if len(temp_f)>1:
+                        other_mean_reps = torch.mean(temp_f[torch.argsort(similarities, descending=True)[1:]],dim=0)
+                        weighted_reps = 0.7*best_proto+0.3*other_mean_reps
+                    else:
+                        weighted_reps = best_proto
+                    mean_f.append(weighted_reps)
+                else:
+                    mean_f.append(torch.mean(temp_f, dim=0))
+
+            all_f = [item.detach() for item in all_f] #所有的proto
+            mean_f = [item.detach() for item in mean_f] #每个类一个平均proto,是0.7*best_proto+0.3*other_mean_reps
+
+        proto_new = copy.deepcopy(reps.data)
         if len(ctx.global_protos) == 0:
             loss2 = 0 * loss1
         else:
             i = 0
             loss2 = None
-            for label in labels:
+
+            for label in owned_classes:
                 if label.item() in ctx.global_protos.keys():
-                    reps_now = reps[i].unsqueeze(0)
-                    loss_instance = self.hierarchical_info_loss(reps_now, label, all_f, mean_f, all_global_protos_keys,ctx)
+                    reps_now = agg_local_protos[label.item()].unsqueeze(0)#reps[i].unsqueeze(0) 本地proto
+                    for i, value in enumerate(all_global_protos_keys):
+                        if value == label.item():
+                            mean_f_pos = mean_f[i].to(ctx.device)
+                            mean_f_pos = mean_f_pos.view(1, -1)
                     if loss2 is None:
-                        loss2 = loss_instance
+                        loss2 = self.loss_mse(reps_now, mean_f_pos)
                     else:
-                        loss2 += loss_instance
+                        loss2 += self.loss_mse(reps_now, mean_f_pos)
                 i += 1
             loss2 = loss2 / i
-        loss2 = loss2
-
+        loss2 = loss2.squeeze()
         # if len(ctx.global_protos) != 0:
         #     global_protos = torch.stack(list(ctx.global_protos.values())).detach()
         #     similarity = torch.matmul(reps,  global_protos.T)
         # else:
         #     similarity=pred
         loss = loss1 + loss2 * self.proto_weight
+
+
+
+
+
+        # loss2 = 0 * loss1  # TODO: 测试用，记得删除
+        # if len(ctx.global_protos) == 0:
+        #     loss2 = 0 * loss1
+        # else:
+        #     proto_new = copy.deepcopy(reps.data)  # TODO: .data会有问题吗，是不是应该用detach()？
+        #     for cls in owned_classes:
+        #         if cls.item() in ctx.global_protos.keys():
+        #             proto_new[labels == cls] = ctx.global_protos[cls.item()]
+        #     loss2 = self.loss_mse(reps, proto_new)
+        #
+        # # if len(ctx.global_protos) != 0:
+        # #     global_protos = torch.stack(list(ctx.global_protos.values())).detach()
+        # #     similarity = torch.matmul(reps,  global_protos.T)
+        # # else:
+        # #     similarity=pred
+        # loss = loss1 + loss2 * self.proto_weight
 
         if ctx.cfg.fedproto.show_verbose:
             logger.info(
@@ -120,7 +181,6 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
             _, reps_all = ctx.model(batch)
             reps = reps_all[split_mask]
 
-
             owned_classes = labels.unique()
             for cls in owned_classes:
                 filted_reps = reps[labels == cls].detach()
@@ -137,7 +197,6 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
             ctx.node_emb_all = reps_all.clone().detach()
             ctx.node_labels = batch.y.clone().detach()
 
-
     def train(self, target_data_split_name="train", hooks_set=None):
         hooks_set = hooks_set or self.hooks_in_train
 
@@ -149,56 +208,16 @@ class FedProto_Node_Trainer(GeneralTorchTrainer):
                                         target_data_split_name)
 
         training_end_time = datetime.datetime.now()
-        training_time = training_end_time-training_begin_time
+        training_time = training_end_time - training_begin_time
         self.ctx.monitor.track_training_time(training_time)  # 记录每次本地训练的训练时间
 
         return num_samples, self.get_model_para(), self.ctx.eval_metrics, self.ctx.agg_local_protos
 
 
-    def hierarchical_info_loss(self,f_now, label, all_f, mean_f, all_global_protos_keys,ctx):
-        for i, value in enumerate(all_global_protos_keys):
-            if value == label.item():
-                f_pos = all_f[i].to(ctx.device)
-                mean_f_pos = mean_f[i].to(ctx.device)
-        indices2 = [i for i, value in enumerate(all_global_protos_keys) if value != label.item()]
-        f_neg = []
-        for i in indices2:
-            f_neg.append(all_f[i])
-        f_neg = torch.cat(f_neg).to(ctx.device)
-        xi_info_loss = self.calculate_infonce(f_now, f_pos, f_neg, ctx.device)
-
-
-        mean_f_pos = mean_f_pos.view(1, -1)
-        # mean_f_neg = torch.cat(list(np.array(mean_f)[all_global_protos_keys != label.item()]), dim=0).to(self.device)
-        # mean_f_neg = mean_f_neg.view(9, -1)
-
-        loss_mse = nn.MSELoss()
-        cu_info_loss = loss_mse(f_now, mean_f_pos)
-
-        hierar_info_loss = xi_info_loss + cu_info_loss
-        return hierar_info_loss
-
-    def calculate_infonce(self,f_now, f_pos, f_neg,device):
-        f_proto = torch.cat((f_pos, f_neg), dim=0)
-        l = torch.cosine_similarity(f_now, f_proto, dim=1)
-        l = l / self._cfg.fedproto.infoNCET
-        exp_l = torch.exp(l)
-        exp_l = exp_l.view(1, -1)
-        pos_mask = [1 for _ in range(f_pos.shape[0])] + [0 for _ in range(f_neg.shape[0])]
-        pos_mask = torch.tensor(pos_mask, dtype=torch.float).to(device)
-        pos_mask = pos_mask.view(1, -1)
-        # pos_l = torch.einsum('nc,ck->nk', [exp_l, pos_mask])
-        pos_l = exp_l * pos_mask
-        sum_pos_l = pos_l.sum(1)
-        sum_exp_l = exp_l.sum(1)
-        infonce_loss = -torch.log(sum_pos_l / sum_exp_l)
-        return infonce_loss
-
-
 def call_my_trainer(trainer_type):
-    if trainer_type == 'fedproto_rethink_trainer':
-        trainer_builder = FedProto_Node_Trainer
+    if trainer_type == 'fgpl_trainer_1_nolocalstrength':
+        trainer_builder = FGPL_1_Trainer
         return trainer_builder
 
 
-register_trainer('fedproto_rethink_trainer', call_my_trainer)
+register_trainer('fgpl_trainer_1_nolocalstrength', call_my_trainer)

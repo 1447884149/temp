@@ -8,9 +8,9 @@ from federatedscope.core.auxiliaries.utils import merge_dict_of_results, \
     Timeout, merge_param_dict
 logger = logging.getLogger(__name__)
 
-# 可以作为没有领域原型，只用普通原型的ablation
+
 # Build your worker here.
-class FedprotoShaServer(Server):
+class FGPLNoclusterServer(Server):
     
     def check_and_move_on(self,
                           check_eval_result=False,
@@ -33,13 +33,11 @@ class FedprotoShaServer(Server):
                 # update global protos
                 #################################################################
                 local_protos_list = dict()
-                local_embedding_list = dict()
                 msg_list = self.msg_buffer['train'][self.state]
                 aggregated_num = len(msg_list)
                 for key, values in msg_list.items():
                     local_protos_list[key] = values[1]
-                    local_embedding_list[key] = values[2]
-                global_protos,global_embedding = self._proto_aggregation(local_protos_list, local_embedding_list)
+                global_protos = self._proto_aggregation(local_protos_list)
                 #################################################################
 
                 self.state += 1
@@ -60,7 +58,7 @@ class FedprotoShaServer(Server):
                     self.msg_buffer['train'][self.state] = dict()
                     self.staled_msg_buffer.clear()
                     # Start a new training round
-                    self._start_new_training_round(global_protos, global_embedding)
+                    self._start_new_training_round(global_protos)
                 else:
                     # Final Evaluate
                     logger.info('Server: Training is finished! Starting '
@@ -78,9 +76,8 @@ class FedprotoShaServer(Server):
 
         return move_on_flag
 
-    def _proto_aggregation(self, local_protos_list, local_embedding_list):
+    def _proto_aggregation(self, local_protos_list):
         agg_protos_label = dict()
-        agg_embedding_label = dict()
         for idx in local_protos_list:
             local_protos = local_protos_list[idx]
             for label in local_protos.keys():
@@ -98,27 +95,10 @@ class FedprotoShaServer(Server):
             else:
                 agg_protos_label[label] = proto_list[0].data
 
-        for idx in local_embedding_list:
-            local_embedding = local_embedding_list[idx]
-            for label in local_embedding.keys():
-                if label in agg_embedding_label:
-                    agg_embedding_label[label].append(local_embedding[label])
-                else:
-                    agg_embedding_label[label] = [local_embedding[label]]
+        return agg_protos_label
 
-        for [label, embedding_list] in agg_embedding_label.items():
-            if len(embedding_list) > 1:
-                embedding = 0 * embedding_list[0].data
-                for i in embedding_list:
-                    embedding += i.data
-                agg_embedding_label[label] = embedding / len(embedding_list)
-            else:
-                agg_embedding_label[label] = embedding_list[0].data
-
-        return agg_protos_label ,agg_embedding_label
-
-    def _start_new_training_round(self, global_protos, global_embedding):
-        self._broadcast_custom_message(msg_type='global_proto',content=[global_protos,global_embedding])
+    def _start_new_training_round(self, global_protos):
+        self._broadcast_custom_message(msg_type='global_proto',content=global_protos)
 
     def eval(self):
         self._broadcast_custom_message(msg_type='evaluate',content=None, filter_unseen_clients=False)
@@ -153,7 +133,7 @@ class FedprotoShaServer(Server):
             self.sampler.change_state(self.unseen_clients_id, 'seen')
 
 
-class FedprotoShaClient(Client):
+class FGPLNoclusterClient(Client):
     def __init__(self,
                  ID=-1,
                  server_id=None,
@@ -166,10 +146,9 @@ class FedprotoShaClient(Client):
                  is_unseen_client=False,
                  *args,
                  **kwargs):
-        super(FedprotoShaClient, self).__init__(ID, server_id, state, config, data, model, device,
+        super(FGPLNoclusterClient, self).__init__(ID, server_id, state, config, data, model, device,
                                              strategy, is_unseen_client, *args, **kwargs)
         self.trainer.ctx.global_protos = []
-        self.trainer.ctx.global_embedding = []
         self.trainer.ctx.client_ID = self.ID
         self.register_handlers('global_proto',
                                self.callback_funcs_for_model_para,
@@ -177,12 +156,9 @@ class FedprotoShaClient(Client):
 
         # For visualization of node embedding
         self.client_agg_proto = dict()
-        self.client_agg_embedding = dict()
         self.client_node_emb_all = dict()
         self.client_node_labels = dict()
         self.glob_proto_on_client = dict()
-        self.glob_embedding_on_client = dict()
-
 
     def join_in(self):
         """
@@ -198,7 +174,7 @@ class FedprotoShaClient(Client):
     def callback_funcs_for_model_para(self, message: Message):
         round = message.state
         sender = message.sender
-
+        timestamp = message.timestamp
         content = message.content
 
         #替换本地global_proto
@@ -207,6 +183,7 @@ class FedprotoShaClient(Client):
         self.state = round
         self.trainer.ctx.cur_state = self.state
         sample_size, model_para, results, agg_protos = self.trainer.train()
+
         train_log_res = self._monitor.format_eval_res(
             results,
             rnd=self.state,
@@ -224,6 +201,7 @@ class FedprotoShaClient(Client):
             self.client_node_labels[round] = self.trainer.ctx.node_labels
             self.client_agg_proto[round] = agg_protos
 
+
         self.comm_manager.send(
             Message(msg_type='model_para',
                     sender=self.ID,
@@ -237,7 +215,7 @@ class FedprotoShaClient(Client):
             f"=================")
 
         if message.content is not None:
-            self.trainer.update(message.content,torch.zeros(1433), strict=True)
+            self.trainer.update(message.content, strict=True)
         if self._cfg.vis_embedding:
             folderPath = self._cfg.MHFL.emb_file_path
             torch.save(self.glob_proto_on_client, f'{folderPath}/global_protos_on_client_{self.ID}.pth')  # 全局原型
@@ -249,9 +227,9 @@ class FedprotoShaClient(Client):
         self._monitor.finish_fl()
 
 def call_my_worker(method):
-    if method == 'fgpl_worker':
-        worker_builder = {'client': FedprotoShaClient, 'server': FedprotoShaServer}
+    if method == 'fgpl_nocluster':
+        worker_builder = {'client': FGPLNoclusterClient, 'server': FGPLNoclusterServer}
         return worker_builder
 
 
-register_worker('fgpl_worker', call_my_worker)
+register_worker('fgpl_nocluster', call_my_worker)
